@@ -27,8 +27,8 @@ PKGPT 2.0 is an update of the [original PKGPT implementation](https://github.com
 
 | Area | Original PKGPT | PKGPT 2.0 |
 |---|---|---|
-| Optimization strategy | General recursive improvement over 3-10 iterations | Five phase-specific workflows with explicit transition criteria for structural, estimation, IIV, and covariate decisions |
-| Covariate modeling | Covariate relationships could be proposed during model generation or improvement | Complete SCM with frozen-base forward rounds, explicit OFV criteria, and automatic backward elimination |
+| Phase workflow | Five model-development phases and phase-specific prompts were already present, but cross-module enum comparison could route later phases to the Phase 1 prompt and early-stop paths could prevent Phase 5 entry | Value-based prompt routing, corrected Phase 5 entry, stricter Phase 2 completion checks, and phase-specific recovery priorities make the existing five-phase design execute as intended |
+| Covariate modeling | Phase 5 prompts described forward selection and backward elimination, but candidate testing did not implement frozen-base rounds or an automatic backward-elimination runtime | SCM now screens every candidate against a frozen round base, selects the largest significant OFV winner, and then performs automatic backward elimination |
 | Covariate control | Automatic detection of available covariates | Automatic mode remains available, while users can optionally restrict SCM to selected covariates and target parameters |
 | Preliminary information | Modeling was primarily guided by the dataset and the language model's existing knowledge | Optional `--prior-info` input can provide drug name or class, nonclinical data, user-supplied published information, study population, and covariates to prioritize |
 | Initial values | AI-generated initial parameter estimates | PK plausibility ranges and typical values are supplied as context, and collapsed boundary estimates are not blindly reused |
@@ -36,7 +36,7 @@ PKGPT 2.0 is an update of the [original PKGPT implementation](https://github.com
 | Model safety | Convergence, OFV, RSE, shrinkage, warnings, and errors guided recursive updates | Adds covariance and boundary gates, compartment-invariance checks, ADVAN/TRANS compatibility checks, and repeated-strategy tracking |
 | LLM access | Direct Google Gemini profiles | Unified OpenRouter access to configured Claude, Gemini, and GPT profiles |
 | Run records | Iteration control streams, NONMEM listings, history, and final model | Adds an automatic full terminal transcript and detailed SCM outcome reporting |
-| Iteration control | A common maximum iteration limit | Phase 1-4 default increases to 20, while Phase 5 continues until applicable SCM candidates are tested |
+| Iteration control | Phase 5 had a fixed 20-iteration stop in addition to the general optimization limit | Phase 1-4 default increases to 20, while Phase 5 continues until applicable SCM candidates are tested |
 
 Functions that already existed in PKGPT - dataset analysis, automatic compartment guidance, complete control-stream generation, NONMEM execution, result parsing, recursive improvement, progress tracking, mock testing, and final-model saving - are retained and are not presented as new 2.0 features.
 
@@ -91,9 +91,9 @@ The console and terminal transcript show phase transitions, iteration-level OFV 
 
 The following improvements are new relative to the previously published PKGPT version. Existing capabilities are described in the surrounding sections but are not claimed as new functionality.
 
-### 1. Five-phase model-development workflow
+### 1. Corrected five-phase routing and transitions
 
-Optimization is now routed through phase-specific prompts and completion criteria:
+The original code already defined five model-development phases and phase-specific prompt classes:
 
 1. Establish a stable base model
 2. Diagnose structural and estimation problems
@@ -101,7 +101,9 @@ Optimization is now routed through phase-specific prompts and completion criteri
 4. Optimize the IIV structure
 5. Perform stepwise covariate modeling (SCM)
 
-Phase 2 prioritizes bounds and initial estimates, IIV simplification, and residual-error changes before considering a compartment change. Transition to later phases also requires stronger convergence, covariance, and boundary checks.
+PKGPT 2.0 does not claim these five phase names as a new feature. It fixes the execution path around them. Cross-module `ModelPhase` values are compared by value so Phase 2-5 prompts no longer silently fall back to the Phase 1 prompt. Grade-A early-stop routing can now enter Phase 5, and Phase 2 completion requires successful minimization and covariance without boundary warnings.
+
+Within Phase 2, recovery now prioritizes bounds and initial estimates, IIV simplification, and residual-error changes before considering a compartment change. Phase 2 and Phase 4 also use stronger prohibitions against premature covariate insertion.
 
 ### 2. Round-based forward SCM and backward elimination
 
@@ -112,13 +114,14 @@ Phase 5 now performs a full SCM workflow:
 - Forward selection uses `p < 0.05` (`Delta OFV < -3.84`, 1 df).
 - Backward elimination follows automatically using `p < 0.01` (retained when removal increases OFV by at least `6.63`, 1 df).
 - The final report distinguishes selected, retained, rejected, and eliminated effects.
+- SCM result tables include the iteration number for each tested candidate.
 - Phase 5 continues until the configured candidate set is exhausted, independently of the Phase 1-4 iteration limit.
 
-During SCM, the structural model, ADVAN/TRANS choice, estimation method, residual-error model, and IIV structure are frozen. Only the requested covariate effect may change.
+During SCM, the structural model, ADVAN/TRANS choice, estimation method, residual-error model, and IIV structure are frozen. Only the requested covariate effect may change. Covariance-failed candidates cannot replace the SCM base, and the generated code is checked for addition of an unintended covariate or target parameter.
 
 ### 3. Data-driven covariate handling
 
-- Covariate medians are calculated from the dataset instead of being hard-coded.
+- SCM centering medians are calculated from the dataset instead of using hard-coded reference medians.
 - Candidate model type is selected consistently through one data-loader function (for example, power, linear, or categorical forms).
 - Covariates are evaluated against both `CL` and `V1` when appropriate instead of being forced onto one parameter.
 - Weight is no longer automatically embedded as a fixed allometric effect in the base model. It is evaluated through the same SCM procedure as other covariates.
@@ -147,6 +150,8 @@ When a likely mismatch is detected, the initial-generation prompt requests an ap
 - Repeated failed strategies are tracked to discourage identical retries.
 - Compartment-count invariance and ADVAN/TRANS compatibility checks guard error recovery.
 - Repeated syntax or minimization failures can restore the best known code before retrying.
+- FOCE-I enforcement rejects unsupported substitutions such as SAEM, ITS, BAYES, MCMC, NUTS, and LAPLACE.
+- Phase 5 covariate-THETA boundary events are not misclassified as residual-error model failures.
 - Phase 5 skips an unused AI quality call, reducing unnecessary latency and API usage.
 
 ### 7. OpenRouter multi-model support

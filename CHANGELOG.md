@@ -6,7 +6,6 @@ This release candidate updates the previously published PKGPT implementation. Th
 
 ### Added
 
-- Five-phase model-development workflow with phase-specific prompts and transition criteria.
 - Round-based SCM forward screening against a frozen base model.
 - Automatic backward elimination after forward selection.
 - Phase 5 structural guards that freeze ADVAN/TRANS, compartment structure, estimation, residual error, and IIV while a covariate is tested.
@@ -27,7 +26,7 @@ This release candidate updates the previously published PKGPT implementation. Th
 - Phase 2 recovery priority now favors bounds/initial values, IIV simplification, and residual-error correction before compartment changes.
 - Boundary-collapsed estimates are not reused blindly as new initial values.
 - Initial THETA generation receives plausibility reference values.
-- Covariate medians are calculated from the dataset.
+- SCM centering medians are calculated from the dataset instead of using hard-coded reference medians.
 - Covariate model-type selection is centralized in the data loader.
 - Weight is evaluated through SCM instead of being forced into the base model.
 - Shrinkage decisions consistently use the maximum ETA shrinkage.
@@ -39,6 +38,7 @@ This release candidate updates the previously published PKGPT implementation. Th
 
 - Corrected phase prompt routing that could silently fall back to Phase 1 logic.
 - Corrected early-stop routing so a qualified base model can enter Phase 5.
+- Preserved the existing five-phase design while strengthening Phase 2 transition criteria and recovery priorities.
 - Corrected stale Phase 5 base OFV/code handling.
 - Prevented covariance-failed candidate models from replacing an SCM base.
 - Prevented Phase 5 covariate THETA boundaries from being misclassified as residual-error failures.
@@ -46,6 +46,7 @@ This release candidate updates the previously published PKGPT implementation. Th
 - Expanded FOCE-I enforcement to reject unsupported estimation-method substitutions.
 - Strengthened Phase 2 completion checks with covariance and boundary status.
 - Strengthened Phase 2 and Phase 4 prohibitions against premature covariate insertion.
+- Detected when generated SCM code adds a covariate or target parameter other than the directed candidate.
 - Included iteration numbers in SCM result reporting.
 
 ### Notes
@@ -53,4 +54,3 @@ This release candidate updates the previously published PKGPT implementation. Th
 - PK plausibility references use the selected language model's existing knowledge; no live literature-search integration is included.
 - Preliminary information supplied with `--prior-info` is optional and is not automatically verified.
 - The codebase-audit observations recorded during development are not listed as release features when no corresponding code change was made.
-
