@@ -6,7 +6,7 @@
 
 AI-assisted generation and iterative optimization of NONMEM population pharmacokinetic models.
 
-PKGPT analyzes a NONMEM-format dataset, generates an initial control stream, executes NONMEM, evaluates the output, and iteratively proposes model updates. Version 2.0 adds a phase-specific optimization workflow, a complete stepwise covariate modeling process, stronger model-safety checks, optional user-provided prior information, and OpenRouter-based multi-model access.
+PKGPT analyzes a NONMEM-format dataset, generates an initial control stream, executes NONMEM, evaluates the output, and iteratively proposes model updates. PKGPT 2.0 preserves the original workflow while making model development more controlled and reproducible through phase-specific optimization, complete stepwise covariate modeling, stronger model-safety checks, optional user-provided prior information, and OpenRouter-based multi-model access.
 
 > **Status:** Research prototype (`v2.0.0-rc1`). Every generated model must be reviewed and validated by a qualified pharmacometrician.
 
@@ -20,6 +20,25 @@ PKGPT is a research-oriented workflow for AI-assisted population PK model develo
 - **Iterative model refinement:** parses NONMEM results, identifies convergence and model-quality problems, and requests a targeted update for the current development phase.
 
 The optimizer is not intended to replace pharmacometric judgment. Its purpose is to make model-development steps explicit, reproducible, and easier to inspect while retaining NONMEM as the estimation engine.
+
+## Key Improvements over the Original PKGPT
+
+PKGPT 2.0 is an update of the [original PKGPT implementation](https://github.com/Gumgo91/PKGPT), not a separate modeling concept. The original sequence - analyze data, generate a NONMEM model, execute NONMEM, interpret the result, and improve the model recursively - remains intact. Version 2.0 strengthens how decisions are made inside that sequence.
+
+| Area | Original PKGPT | PKGPT 2.0 improvement | Practical benefit |
+|---|---|---|---|
+| Optimization strategy | General recursive improvement over 3-10 iterations | Five phase-specific workflows with explicit transition criteria | Structural, estimation, IIV, and covariate decisions are addressed in a controlled order |
+| Covariate modeling | Covariate relationships could be proposed during model generation or improvement | Complete SCM with frozen-base forward rounds and automatic backward elimination | Candidate effects are compared against the correct base and retained using explicit statistical criteria |
+| Covariate control | Automatic detection of available covariates | Optional user-selected covariates and target parameters, while retaining automatic mode | Users can focus the search without automatically accepting the requested effects |
+| Initial values | AI-generated initial parameter estimates | PK plausibility ranges and typical values are supplied as context; collapsed boundary estimates are not blindly reused | Reduces repeated implausible initialization and supports more interpretable recovery |
+| Dose units | No dedicated dose-scale safeguard described in the original workflow | Heuristic checks for mg, mg/kg, mcg, mcg/kg, and g, including weight-normalization consistency | Helps identify likely AMT scale mismatches before they propagate into parameter estimates |
+| Model safety | Convergence, OFV, RSE, shrinkage, warnings, and errors guided recursive updates | Adds covariance and boundary gates, compartment-invariance checks, ADVAN/TRANS compatibility checks, and repeated-strategy tracking | Reduces unrelated or repeated model changes during error recovery |
+| LLM access | Direct Google Gemini profiles | Unified OpenRouter access to configured Claude, Gemini, and GPT profiles | Allows model selection through one client and one API configuration |
+| Preliminary context | Dataset-derived information was used for initial generation | Optional drug, class, nonclinical, published, population, and covariate-priority context through `--prior-info` | Supports new-drug and population-specific modeling when users have relevant prior knowledge |
+| Run records | Iteration control streams, NONMEM listings, history, and final model | Adds an automatic full terminal transcript and detailed SCM outcome reporting | Makes failed and successful runs easier to review and share internally |
+| Iteration control | A common maximum iteration limit | Phase 1-4 default increases to 20; Phase 5 continues until applicable SCM candidates are tested | Prevents covariate evaluation from stopping only because the base-model iteration limit was reached |
+
+Functions that already existed in PKGPT - dataset analysis, automatic compartment guidance, complete control-stream generation, NONMEM execution, result parsing, recursive improvement, progress tracking, mock testing, and final-model saving - are retained and are not presented as new 2.0 features.
 
 ## Core Features
 
@@ -68,9 +87,9 @@ Instead of sending the same generic improvement request after every run, version
 
 The console and terminal transcript show phase transitions, iteration-level OFV and quality metrics, SCM candidates, round winners, backward-elimination results, and the selected final control stream.
 
-## What's New in 2.0
+## What's Improved in PKGPT 2.0
 
-The following items are new relative to the previously published PKGPT version. Existing functions such as dataset analysis, initial NONMEM code generation, NONMEM execution, output parsing, and recursive model improvement are not repeated here.
+The following improvements are new relative to the previously published PKGPT version. Existing capabilities are described in the surrounding sections but are not claimed as new functionality.
 
 ### 1. Five-phase model-development workflow
 
