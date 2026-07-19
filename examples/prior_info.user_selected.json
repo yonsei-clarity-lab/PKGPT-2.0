@@ -1,0 +1,22 @@
+{
+  "drug": {
+    "name": "Example compound",
+    "class": "small_molecule"
+  },
+  "population": {
+    "group": "healthy_volunteers"
+  },
+  "covariates": {
+    "mode": "user_selected",
+    "candidates": [
+      {
+        "name": "WT",
+        "target_parameters": ["CL", "V1"]
+      },
+      {
+        "name": "ALBUMIN",
+        "target_parameters": ["CL"]
+      }
+    ]
+  }
+}

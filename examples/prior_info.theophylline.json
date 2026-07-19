@@ -1,0 +1,24 @@
+{
+  "drug": {
+    "name": "Theophylline",
+    "class": "small_molecule"
+  },
+  "nonclinical_data": {
+    "summary": "not_provided"
+  },
+  "published_data": {
+    "summary": "Known oral theophylline population PK dataset"
+  },
+  "population": {
+    "group": "healthy_volunteers"
+  },
+  "covariates": {
+    "mode": "user_selected",
+    "candidates": [
+      {
+        "name": "WT",
+        "target_parameters": ["CL", "V1"]
+      }
+    ]
+  }
+}
