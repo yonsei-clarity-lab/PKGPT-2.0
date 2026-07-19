@@ -3652,7 +3652,7 @@ ABSOLUTE PROHIBITIONS IN PHASE 4 (cannot be overridden):
             # 한 번 사용 후 초기화 (다음 iteration에는 전달 안 함)
             self.last_revert_info = None
 
-        response = self.gemini_client.generate(prompt)
+        response = self.gemini_client.generate(prompt, model_type=self.model)
 
         # Extract improved code
         self.current_code = self._enforce_foce_estimation(
@@ -3676,7 +3676,10 @@ ABSOLUTE PROHIBITIONS IN PHASE 4 (cannot be overridden):
                 if _guard_attempt == 1:
                     break  # already retried once, proceed with whatever we have
                 retry_prompt = prompt + f"\n\n{'!'*70}\n{guard_problem}\n{'!'*70}\n"
-                retry_response = self.gemini_client.generate(retry_prompt)
+                retry_response = self.gemini_client.generate(
+                    retry_prompt,
+                    model_type=self.model
+                )
                 self.current_code = self._enforce_foce_estimation(
                     self._enforce_input_line(self._extract_nonmem_code(retry_response))
                 )

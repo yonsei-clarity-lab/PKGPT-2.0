@@ -48,6 +48,7 @@ This release candidate updates the previously published PKGPT implementation. Th
 - Strengthened Phase 2 and Phase 4 prohibitions against premature covariate insertion.
 - Detected when generated SCM code adds a covariate or target parameter other than the directed candidate.
 - Included iteration numbers in SCM result reporting.
+- Applied the CLI-selected `--model` profile consistently to improvement generation and structural-guard retry calls.
 
 ### Notes
 

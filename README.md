@@ -254,6 +254,27 @@ python pkgpt_optimizer.py dataset/wafarin.csv output_warfarin --model gemini-pro
 python pkgpt_optimizer.py dataset/theo.csv output_theo --prior-info examples/prior_info.theophylline.json
 ```
 
+### Selecting an OpenRouter API model
+
+PKGPT uses one OpenRouter API key for all configured provider families. Select the model profile for the complete optimization run with `--model`; if the option is omitted, `claude-sonnet` is used.
+
+Windows examples:
+
+```bat
+set OPENROUTER_API_KEY=your_api_key_here
+
+REM Anthropic Claude (default)
+python pkgpt_optimizer.py dataset/theo.csv output_claude --nmfe C:\nm75g64\run\nmfe75.bat --model claude-sonnet
+
+REM Google Gemini
+python pkgpt_optimizer.py dataset/theo.csv output_gemini --nmfe C:\nm75g64\run\nmfe75.bat --model gemini-pro
+
+REM OpenAI GPT
+python pkgpt_optimizer.py dataset/theo.csv output_gpt --nmfe C:\nm75g64\run\nmfe75.bat --model gpt-4.1
+```
+
+`--model` accepts a PKGPT profile name, not an arbitrary provider model ID. The configured profile-to-model mapping is listed under [Available OpenRouter Model Profiles](#available-openrouter-model-profiles) and defined in `modules/openrouter_client.py`. Availability, access, and usage charges are determined by the user's OpenRouter account.
+
 Use `python pkgpt_optimizer.py --help` for the current command-line options.
 
 ## Command-line Options
