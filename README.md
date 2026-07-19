@@ -542,6 +542,10 @@ PKGPT is a research codebase. Bug reports and focused pull requests should inclu
 
 Do not include API keys, confidential clinical data, or restricted NONMEM installation files in issues or pull requests.
 
+## Acknowledgments
+
+PKGPT 2.0 builds on the original PKGPT developed by Hyunseung Kong and Hoyoung Kwack. Their contribution and the applicable original copyright notice are preserved in the project history and [`LICENSE`](LICENSE).
+
 ## License
 
 PKGPT 2.0 is distributed under the MIT License. See [`LICENSE`](LICENSE) for the complete terms and preserved copyright notices for the original and 2.0 contributors.
