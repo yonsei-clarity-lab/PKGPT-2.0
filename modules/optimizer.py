@@ -43,6 +43,36 @@ class ModelPhase(Enum):
         return phase_names.get(self, "Unknown Phase")
 
 
+def _extract_json_object(text: str) -> str:
+    """Pull a JSON object out of raw LLM output that may not be pure JSON.
+
+    A plain `.strip()` + "starts with ```" check (the previous approach) only
+    handles a fenced block sitting at position 0. Claude models in particular
+    tend to prepend a short sentence of commentary before the JSON even when
+    told "Respond ONLY with valid JSON, no explanation" — this was observed to
+    happen specifically on the web-search-grounded plausibility-bounds call
+    (Gemini didn't do this, Claude sonnet/opus did), causing
+    `json.loads()` to fail with "Expecting value: line 1 column 1 (char 0)"
+    because the string handed to it started with prose, not JSON.
+
+    Handles, in order: a ```json fenced block anywhere in the text, a plain
+    ``` fenced block anywhere in the text, or (fallback) the substring from
+    the first '{' to the last '}'. Falls back to the stripped original text
+    if none of those patterns match, so callers still get the original
+    (clear) json.JSONDecodeError instead of this function silently mangling
+    unrelated content.
+    """
+    text = text.strip()
+    fence_match = re.search(r"```(?:json)?\s*(\{.*\})\s*```", text, re.DOTALL)
+    if fence_match:
+        return fence_match.group(1).strip()
+    start = text.find('{')
+    end = text.rfind('}')
+    if start != -1 and end != -1 and end > start:
+        return text[start:end + 1]
+    return text
+
+
 class NONMEMOptimizer:
     """Recursive optimizer for NONMEM models"""
 
@@ -237,6 +267,36 @@ class NONMEMOptimizer:
                 new_phase = self._determine_current_phase(parsed_results)
                 self._update_phase(new_phase)
 
+                # Phase 5 SCM: 이번 iteration에서 테스트한 후보를 라운드 완료 체크보다
+                # 먼저 기록한다. 이 기록(_record_phase5_covariate_result)이
+                # _evaluate_improvement() 안에서만 이뤄지면, 라운드의 마지막 후보를
+                # 테스트한 바로 그 iteration에서는 아직 scm_round_tested에 반영되기 전이라
+                # 아래 "라운드 완료 체크"가 여전히 "1개 남음"으로 오판한다 — 그 상태로
+                # 다음 iteration 코드 생성으로 넘어가면 이미 모든 후보가 테스트된 걸 모른 채
+                # current_covariate_instruction을 못 정해줘서 LLM이 지시 없이 자유 제안을
+                # 하게 되고(이미 테스트한 후보를 재탕), 그 낀 iteration이 끝나야 라운드 완료가
+                # 뒤늦게 처리됐다. 여기서 먼저 기록해두면 같은 iteration 안에서 바로 아래
+                # 체크가 정확한 "0 remaining"을 보고, 다음 iteration이 곧장 새 라운드/모드의
+                # 첫 후보 테스트로 넘어간다. _record_phase5_covariate_result()는
+                # current_covariate_instruction이 없으면 즉시 리턴하는 가드가 있어서
+                # (optimizer.py:2653 부근), _evaluate_improvement() 안의 동일 호출은
+                # 이후 자동으로 no-op이 되어 중복 기록되지 않는다.
+                if self.current_phase == ModelPhase.COVARIATE_ANALYSIS and parsed_results is not None:
+                    _scm_parsed_data = parsed_results.get_parsed_data()
+                    _scm_cov_step = _scm_parsed_data.get('covariance_step', {})
+                    _scm_params = _scm_parsed_data.get('parameter_estimates', {})
+                    _scm_omega_values = [float(o.get('estimate', 1.0))
+                                         for o in _scm_params.get('omega', []) if 'estimate' in o]
+                    _scm_eta_shrinkage = _scm_parsed_data.get('eta_shrinkage', [])
+                    _scm_avg_shrinkage = (max([s['shrinkage'] for s in _scm_eta_shrinkage])
+                                          if _scm_eta_shrinkage else None)
+                    self._record_phase5_covariate_result(
+                        _scm_parsed_data.get('objective_function'),
+                        _scm_cov_step.get('successful', False),
+                        _scm_omega_values,
+                        _scm_avg_shrinkage
+                    )
+
                 # Phase 5 SCM: 현재 라운드의 모든 후보 테스트 완료 시 라운드 결과 처리
                 if self.current_phase == ModelPhase.COVARIATE_ANALYSIS:
                     next_cand = self._get_next_covariate_to_test()
@@ -261,7 +321,15 @@ class NONMEMOptimizer:
                             self.scm_round_tested = set()
                             self.scm_round_results = []
                             self.scm_round_base_ofv = None  # _init_scm_round_base 중복 호출 가드 해제
+                            # _init_scm_round_base()는 self.best_iteration을 호출 시점의
+                            # 현재 루프 카운터로 덮어쓴다 (라운드 base 갱신용 부작용).
+                            # 여기서는 self.best_ofv/self.best_code가 가리키는 진짜 승자 모델의
+                            # iteration 번호를 이미 정확히 들고 있으므로, 그 값을 보존했다가
+                            # 복원한다 — forward round 승자 확정(2935번 줄 부근)과 backward
+                            # 제거 확정(3034번 줄 부근) 경로가 이미 하는 것과 동일한 재보정.
+                            prev_best_iteration = self.best_iteration
                             self._init_scm_round_base(self.best_ofv, self.best_code)
+                            self.best_iteration = prev_best_iteration
                         else:
                             # forward에서 확정된 covariate가 없거나, backward elimination이
                             # 더 이상 제거할 것이 없어 완전히 끝남 → SCM 완료
@@ -274,6 +342,16 @@ class NONMEMOptimizer:
                                 print(f"  Eliminated in backward step: {eliminated_names}")
                             print("[OK] Optimization complete")
                             print("=" * 70)
+                            # SCM이 여기서 바로 break되면 이번 iteration은
+                            # _evaluate_improvement()를 한 번도 못 거치고 끝난다 —
+                            # improvement_history에 이 iteration 항목이 안 생겨서,
+                            # 최종 요약 테이블이 hist_by_iter로 OFV/Shrink/MaxRSE를
+                            # 조회할 때 빈 값(N/A)만 나오는 원인이었다. break 전에
+                            # 한 번 호출해 기록을 남긴다 (Phase 5라 조기종료/AI
+                            # 품질평가는 타지 않고 바로 True를 반환하므로 안전하고,
+                            # _init_scm_round_base/_record_phase5_covariate_result는
+                            # 이미 위에서 처리돼 guard로 인해 no-op).
+                            self._evaluate_improvement(parsed_results)
                             break
 
                 # Check for improvement
@@ -470,9 +548,26 @@ class NONMEMOptimizer:
 
     def _build_plausibility_bounds(self) -> dict:
         """
-        LLM에게 약물별 생리학적 PK 파라미터 한계값을 한 번만 물어봄.
-        output_base와 데이터 파일명에서 약물명을 추론하고
-        CL, V1, Q, V2에 대한 min/max 범위를 JSON으로 반환받아 저장.
+        LLM에게 약물별 생리학적 PK 파라미터 한계값을 물어봄.
+        output_base와 데이터 파일명에서 약물명을 추론하고, 이 약물이 몇 개의
+        구획(1 또는 2)으로 기술되는 게 적절한지 판단하게 한 뒤, 그 구획 수에
+        해당하는 파라미터(CL,V1 항상 / Q,V2는 2-compartment일 때만)만 min/max
+        범위로 JSON을 반환받아 저장한다.
+
+        2단계로 나눠서 호출한다:
+          1단계 (검색 없음): drug_hint(파일명 등)만 보고 약물명을 먼저 특정.
+             "pheno" -> Phenobarbital 같은 축약어 인식은 LLM 순수 기억만으로도
+             이미 잘 맞았다 — 이 단계에 웹서치를 같이 걸면, 짧은 drug_hint가
+             뒤에 이어지는 긴 범용 PK 지시문에 묻혀서 Exa가 프롬프트에서 엉뚱한
+             검색어를 뽑아내고(예: propofol처럼 온라인에 압도적으로 많이
+             문서화된 다른 약물 자료를 상위로 가져와서), 원래 잘 맞히던 약물명이
+             검색 결과에 오히려 덮어써지는 회귀가 실제로 발생했다.
+          2단계 (검색 있음): 1단계에서 확정된 "약물명 그 자체"를 프롬프트의
+             주된 주어로 명시해서 generate_with_citations() 호출 — 이러면 Exa가
+             유도하는 검색어도 자연히 그 약물명 위주가 되어, 애매한 파일명 단서
+             하나로 검색을 거는 것보다 훨씬 안정적이다. drug_identified가
+             "unknown"이면 검색할 대상 자체가 없으므로 이 단계도 검색 없이
+             진행한다.
         """
         import json
 
@@ -494,61 +589,121 @@ Fill missing information from your existing pharmacokinetic knowledge. Do not cl
 that an external literature search was performed.
 """
 
-        prompt = f"""You are an expert clinical pharmacokineticist.
+        # ── Step 1: identify the drug from the hint, WITHOUT web search ──────
+        id_prompt = f"""You are an expert clinical pharmacokineticist.
 
 Dataset hint: "{drug_hint}"
 Route of administration: {route_hint}
+{prior_section}
+
+Identify the single drug this dataset most likely comes from (recognize common
+clinical abbreviations in the hint, e.g. "pheno" -> Phenobarbital). Respond ONLY
+with valid JSON, no markdown fences, no explanation:
+{{"drug_identified": "<drug name, or 'unknown' if truly ambiguous>", "route": "<IV or oral>"}}
+"""
+        drug_identified = "unknown"
+        id_route = route_hint
+        try:
+            id_response = self.gemini_client.generate(id_prompt, model_type=self.model)
+            id_json = json.loads(_extract_json_object(id_response))
+            drug_identified = (id_json.get("drug_identified") or "unknown").strip() or "unknown"
+            id_route = id_json.get("route", route_hint) or route_hint
+        except Exception as e:
+            print(f"  [WARNING] Drug identification step failed, proceeding as 'unknown': {e}")
+
+        print(f"  [PLAUSIBILITY] Drug identified: {drug_identified}")
+
+        # ── Step 2: with the drug now unambiguous, ground the actual PK ──────
+        # parameter values (and compartment count) in a real, targeted web search.
+        prompt = f"""You are an expert clinical pharmacokineticist researching: {drug_identified}
+
+Route of administration: {id_route}
 Number of subjects: {n_subjects}
 {prior_section}
 
-Task: Identify the drug from the hints above, then provide physiologically plausible
-POPULATION-LEVEL ranges for its PK parameters (typical values, NOT individual extremes).
-Also provide the typical SINGLE administered dose for this drug/route, in absolute
-milligrams for an average adult patient — this is used to detect dose-unit mismatches
-in the dataset (e.g. a dose column recorded as mg/kg instead of absolute mg).
+Task:
+1. Based on your pharmacokinetic knowledge of {drug_identified} specifically, decide
+   whether its disposition is best described by 1 compartment (single, simple
+   decline) or 2 compartments (a distinct distribution + elimination phase). Do NOT
+   default to 2 compartments out of habit — many drugs are genuinely 1-compartment,
+   and forcing peripheral-compartment parameters onto those drugs fabricates numbers
+   that don't correspond to anything real. Decide from actual PK knowledge of
+   {drug_identified} specifically.
+2. Provide physiologically plausible POPULATION-LEVEL ranges (typical values, NOT
+   individual extremes) ONLY for the parameters that apply to the compartment count
+   you chose in step 1 (see schema below).
+3. Provide the typical SINGLE administered dose for {drug_identified} via
+   {id_route}, in absolute milligrams for an average adult patient — this is used
+   to detect dose-unit mismatches in the dataset (e.g. a dose column recorded as
+   mg/kg instead of absolute mg).
+4. You have live web search results available for this query. Base your typical
+   values on what those search results actually say about {drug_identified}.
+   Do NOT name authors/year/journal yourself — the actual source URLs are
+   captured separately from the search results, not from your own text.
 
 Respond ONLY with valid JSON — no markdown fences, no explanation:
 {{
-  "drug_identified": "<drug name or 'unknown'>",
+  "drug_identified": "{drug_identified}",
   "route": "<IV or oral>",
   "notes": "<1-sentence pharmacokinetic rationale>",
+  "suggested_compartments": <1 or 2>,
+  "compartments_rationale": "<1-sentence: why 1 vs 2 compartments for THIS drug>",
   "typical_single_dose_mg": <number, typical single dose in ABSOLUTE mg for an average adult>,
   "parameters": {{
     "CL":  {{"min": <number>, "typical": <number>, "max": <number>, "unit": "L/h",   "rationale": "<brief>"}},
     "V1":  {{"min": <number>, "typical": <number>, "max": <number>, "unit": "L",     "rationale": "<brief>"}},
-    "Q":   {{"min": <number>, "typical": <number>, "max": <number>, "unit": "L/h",   "rationale": "<brief>"}},
-    "V2":  {{"min": <number>, "typical": <number>, "max": <number>, "unit": "L",     "rationale": "<brief>"}},
     "Ka":  {{"min": <number>, "typical": <number>, "max": <number>, "unit": "1/h",   "rationale": "<brief>"}}
+    // Include "Q" and "V2" (same {{min, typical, max, unit, rationale}} shape,
+    // units "L/h" and "L") ONLY if suggested_compartments == 2. If
+    // suggested_compartments == 1, OMIT the "Q" and "V2" keys entirely —
+    // do not include them with null or made-up values.
   }}
 }}
 
 "typical" = the single best population-representative point estimate (this is
 what should be used as a THETA initial estimate) — NOT the same as min or max.
 
-Be specific to the identified drug class. Use literature population estimates.
+Be specific to {drug_identified}. Use literature population estimates.
 """
 
         try:
-            response = self.gemini_client.generate(prompt, model_type=self.model)
-            json_text = response.strip()
-            if json_text.startswith("```"):
-                lines = json_text.split("\n")[1:]
-                if lines and lines[-1].strip() == "```":
-                    lines = lines[:-1]
-                json_text = "\n".join(lines).strip()
-            bounds = json.loads(json_text)
-            drug = bounds.get("drug_identified", "unknown")
-            print(f"  [PLAUSIBILITY] Drug identified: {drug}")
+            if drug_identified.lower() != "unknown":
+                response, citations = self.gemini_client.generate_with_citations(prompt, model_type=self.model)
+            else:
+                # Nothing concrete to search for — fall back to a plain (no
+                # search) call rather than letting Exa guess from a vague prompt.
+                response = self.gemini_client.generate(prompt, model_type=self.model)
+                citations = []
+            bounds = json.loads(_extract_json_object(response))
+            # Step 1's identification is authoritative — don't let step 2 drift.
+            bounds["drug_identified"] = drug_identified
+            if citations:
+                print(f"  [PLAUSIBILITY]   Sources (web search):")
+                for url in citations:
+                    print(f"  [PLAUSIBILITY]     - {url}")
+            else:
+                print(f"  [PLAUSIBILITY]   Sources: none returned — values below are unverified LLM memory")
+            n_comp = bounds.get("suggested_compartments")
+            if n_comp is not None:
+                comp_rationale = bounds.get("compartments_rationale", "")
+                comp_rationale_s = f" — {comp_rationale}" if comp_rationale else ""
+                print(f"  [PLAUSIBILITY]   Suggested compartments: {n_comp}{comp_rationale_s}")
             typical_dose = bounds.get("typical_single_dose_mg")
             if typical_dose is not None:
                 print(f"  [PLAUSIBILITY]   Typical single dose: {typical_dose} mg")
             for pname, pvals in bounds.get("parameters", {}).items():
+                if not pvals:
+                    continue
                 typical = pvals.get('typical')
                 typical_s = f", typical={typical}" if typical is not None else ""
                 print(f"  [PLAUSIBILITY]   {pname}: {pvals.get('min')} – {pvals.get('max')} {pvals.get('unit')}{typical_s}")
+            bounds['citations'] = citations
             return bounds
         except Exception as e:
             print(f"  [WARNING] Could not build plausibility bounds: {e}")
+            raw = locals().get('response')
+            if isinstance(raw, str) and raw:
+                print(f"  [WARNING]   Raw response (first 300 chars): {raw[:300]!r}")
             return {}
 
     def _detect_dose_unit_mismatch(self) -> Optional[str]:
@@ -1603,7 +1758,7 @@ This mock allows the optimizer to continue and demonstrate the recursive improve
         # Phase 5 SCM: 라운드 base 초기화 + 테스트 결과 기록
         if self.current_phase == ModelPhase.COVARIATE_ANALYSIS:
             self._init_scm_round_base(current_ofv, self.current_code, current_composite)
-            self._record_phase5_covariate_result(current_ofv, cov_success)
+            self._record_phase5_covariate_result(current_ofv, cov_success, omega_values, avg_eta_shrinkage)
 
         # Get dataset size
         metadata = self.data_loader.get_metadata()
@@ -1660,14 +1815,25 @@ This mock allows the optimizer to continue and demonstrate the recursive improve
 
 
         # Check for early stopping conditions FIRST
-        should_stop, stop_reason = self._should_stop_early()
-        if should_stop:
-            print(f"\n{'='*70}")
-            print("EARLY STOPPING TRIGGERED")
-            print(f"{'='*70}")
-            print(f"Reason: {stop_reason}")
-            print(f"{'='*70}")
-            return False  # Stop optimization
+        # Skipped in Phase 5 (SCM): its composite-score-degradation rule watches a
+        # rolling window of the last 6 iterations, but Phase 5 deliberately reverts
+        # to the round base after every rejected candidate, so that window is full
+        # of expected test/reject churn (e.g. covariance failures on non-winning
+        # candidates), not genuine model regression. Applying it here can trip
+        # early stopping mid-round — including right as forward selection hands
+        # off to backward elimination — before every candidate has even been
+        # tested/eliminated. Phase 5 already has its own deterministic stop
+        # condition (see comment below), same rationale as the AI-quality-check
+        # bypass a few lines down.
+        if self.current_phase != ModelPhase.COVARIATE_ANALYSIS:
+            should_stop, stop_reason = self._should_stop_early()
+            if should_stop:
+                print(f"\n{'='*70}")
+                print("EARLY STOPPING TRIGGERED")
+                print(f"{'='*70}")
+                print(f"Reason: {stop_reason}")
+                print(f"{'='*70}")
+                return False  # Stop optimization
 
         # Phase 5 (SCM): skip the AI quality evaluation below entirely.
         # Its output (recommendations/critical_issues) is never consumed by Phase 5 —
@@ -1777,7 +1943,7 @@ This mock allows the optimizer to continue and demonstrate the recursive improve
                     print(f"[PHASE OVERRIDE] Forcing continuation to complete full workflow")
                     self._update_phase(ModelPhase.COVARIATE_ANALYSIS)
                     self._init_scm_round_base(current_ofv, self.current_code, current_composite)
-                    self._record_phase5_covariate_result(current_ofv, cov_success)
+                    self._record_phase5_covariate_result(current_ofv, cov_success, omega_values, avg_eta_shrinkage)
                     return True
 
                 # Check 5.5: Phase 5 SCM — 미시도 covariate가 남아있으면 계속
@@ -2622,7 +2788,9 @@ ABSOLUTE PROHIBITIONS IN PHASE 4 (cannot be overridden):
                         }
         return None
 
-    def _record_phase5_covariate_result(self, current_ofv, cov_success: bool = False) -> None:
+    def _record_phase5_covariate_result(self, current_ofv, cov_success: bool = False,
+                                         omega_values: Optional[List[float]] = None,
+                                         avg_eta_shrinkage: Optional[float] = None) -> None:
         """
         SCM: 현재 라운드에서 테스트한 covariate의 결과를 기록한다.
 
@@ -2630,6 +2798,8 @@ ABSOLUTE PROHIBITIONS IN PHASE 4 (cannot be overridden):
         _complete_scm_round()에서 모든 후보의 ΔOFV를 비교하여 winner를 선택한다.
 
         여기서는 ΔOFV 계산 + scm_round_results에 기록만 수행.
+        omega_values/avg_eta_shrinkage는 winner 선정 시 numerical safety
+        gate(_is_numerically_safe)에 사용된다.
         """
         if self.current_covariate_instruction is None:
             return
@@ -2658,6 +2828,8 @@ ABSOLUTE PROHIBITIONS IN PHASE 4 (cannot be overridden):
             'ofv': current_ofv,
             'delta_ofv': delta_ofv,
             'cov_ok': cov_success,
+            'omega_values': omega_values or [],
+            'avg_eta_shrinkage': avg_eta_shrinkage,
             'code': self.current_code,
             'iteration': self.iteration,
             'round': self.scm_current_round,
@@ -2823,6 +2995,32 @@ ABSOLUTE PROHIBITIONS IN PHASE 4 (cannot be overridden):
             })
         return result
 
+    def _is_numerically_safe(self, ofv: Optional[float],
+                              omega_values: Optional[List[float]],
+                              shrinkage: Optional[float] = None) -> tuple[bool, str]:
+        """
+        Phase 5 winner 채택 시점의 1회성 numerical safety gate.
+
+        _should_stop_early()의 4개 조건 중 "N회 연속" 형태는 Phase 5 구조(매 후보
+        1회성 테스트 후 base로 revert)와 맞지 않아 Phase 5에서는 적용하지 않는다.
+        하지만 그 중 negative OFV / OMEGA collapse / catastrophic shrinkage가 잡던
+        실제 위험(overfitting되거나 IIV 구조가 무너진 후보가 ΔOFV+cov_ok만으로
+        winner로 채택되는 것)은 여전히 유효하므로, "연속 iteration 감시" 대신
+        "winner 후보 개별 건에 대한 1회 판정"으로 재구성하여 여기서 체크한다.
+        """
+        if ofv is not None and ofv < -50:
+            return False, f"negative OFV ({ofv:.2f} < -50, severe overfitting)"
+
+        if omega_values:
+            collapsed = [o for o in omega_values if o < 0.001]
+            if len(collapsed) == len(omega_values):
+                return False, f"all {len(omega_values)} OMEGA(s) collapsed (<0.001)"
+
+        if shrinkage is not None and shrinkage > 95:
+            return False, f"catastrophic ETA shrinkage ({shrinkage:.1f}% > 95%)"
+
+        return True, ""
+
     def _complete_scm_round(self) -> bool:
         """
         현재 SCM 라운드(forward 또는 backward) 완료 후 처리.
@@ -2849,12 +3047,32 @@ ABSOLUTE PROHIBITIONS IN PHASE 4 (cannot be overridden):
                        and r['delta_ofv'] < -3.84
                        and r.get('cov_ok', False)]
 
+        # Numerical safety gate: ΔOFV/cov_ok를 통과했더라도 severe overfitting
+        # (negative OFV) 또는 OMEGA collapse가 있으면 winner 자격을 박탈한다.
+        # (_should_stop_early()의 "N회 연속" 조기종료와는 별개 — winner 후보
+        # 개별 건에 대한 1회성 판정. see _is_numerically_safe)
+        unsafe = []
+        safe_significant = []
+        for r in significant:
+            ok, reason = self._is_numerically_safe(r.get('ofv'), r.get('omega_values'), r.get('avg_eta_shrinkage'))
+            if ok:
+                safe_significant.append(r)
+            else:
+                unsafe.append((r, reason))
+        for r, reason in unsafe:
+            print(f"  [SCM Round {rnd} SAFETY] '{r['name']}' met ΔOFV/cov threshold but disqualified: {reason}")
+            self._finalize_covariate_result(r['name'], rnd, 'REJECTED_UNSAFE', r.get('mode', 'add'))
+        significant = safe_significant
+
         if not significant:
             # winner 없음 → SCM 종료
             print(f"\n{'='*70}")
             print(f"SCM ROUND {rnd} COMPLETE — NO WINNER")
             print(f"{'='*70}")
-            print(f"  No covariate passed threshold (ΔOFV < -3.84 with covariance success)")
+            if unsafe:
+                print(f"  All candidates that passed ΔOFV/cov threshold were numerically unsafe (see SAFETY lines above)")
+            else:
+                print(f"  No covariate passed threshold (ΔOFV < -3.84 with covariance success)")
             print(f"  Base OFV: {self.scm_round_base_ofv:.2f}")
             print(f"  Tested: {[r['name'] for r in self.scm_round_results]}")
             print(f"{'='*70}")
@@ -2862,9 +3080,12 @@ ABSOLUTE PROHIBITIONS IN PHASE 4 (cannot be overridden):
             if self.scm_round_base_code:
                 self.current_code = self.scm_round_base_code
                 self.best_code = self.scm_round_base_code
-            # covariate_history 결과 확정
+            # covariate_history 결과 확정 (이미 REJECTED_UNSAFE로 확정된 건 건너뜀)
+            unsafe_names = {r['name'] for r, _ in unsafe}
             for r in self.scm_round_results:
-                self._finalize_covariate_result(r['name'], rnd, 'REJECTED')
+                if r['name'] in unsafe_names:
+                    continue
+                self._finalize_covariate_result(r['name'], rnd, 'REJECTED', r.get('mode', 'add'))
             return False
 
         # winner 선택: 가장 큰 ΔOFV 감소폭 (most negative)
@@ -2881,7 +3102,7 @@ ABSOLUTE PROHIBITIONS IN PHASE 4 (cannot be overridden):
                 self.current_code = self.scm_round_base_code
                 self.best_code = self.scm_round_base_code
             for r in self.scm_round_results:
-                self._finalize_covariate_result(r['name'], rnd, 'REJECTED')
+                self._finalize_covariate_result(r['name'], rnd, 'REJECTED', r.get('mode', 'add'))
             return False
 
         # winner 확정 (covariate/parameter/model_type도 저장 — backward elimination에서
@@ -2898,12 +3119,15 @@ ABSOLUTE PROHIBITIONS IN PHASE 4 (cannot be overridden):
             'round': rnd,
         })
 
-        # covariate_history 결과 확정
+        # covariate_history 결과 확정 (이미 REJECTED_UNSAFE로 확정된 건 TESTED로 덮어쓰지 않음)
+        unsafe_names = {r['name'] for r, _ in unsafe}
         for r in self.scm_round_results:
+            if r['name'] in unsafe_names:
+                continue
             if r['name'] == winner_name:
-                self._finalize_covariate_result(r['name'], rnd, 'ACCEPTED')
+                self._finalize_covariate_result(r['name'], rnd, 'ACCEPTED', r.get('mode', 'add'))
             else:
-                self._finalize_covariate_result(r['name'], rnd, 'TESTED')
+                self._finalize_covariate_result(r['name'], rnd, 'TESTED', r.get('mode', 'add'))
 
         # 출력
         base_ofv_s = f"{self.scm_round_base_ofv:.2f}" if self.scm_round_base_ofv is not None else "N/A"
@@ -2958,20 +3182,43 @@ ABSOLUTE PROHIBITIONS IN PHASE 4 (cannot be overridden):
                      and r['delta_ofv'] < threshold
                      and r.get('cov_ok', False)]
 
+        # Numerical safety gate (see _is_numerically_safe / forward round for rationale):
+        # a covariate is only eligible for elimination if the resulting (post-removal)
+        # model is itself numerically sound. An unsafe post-removal fit disqualifies
+        # that covariate from elimination this round — it stays in the model.
+        unsafe = []
+        safe_removable = []
+        for r in removable:
+            ok, reason = self._is_numerically_safe(r.get('ofv'), r.get('omega_values'), r.get('avg_eta_shrinkage'))
+            if ok:
+                safe_removable.append(r)
+            else:
+                unsafe.append((r, reason))
+        for r, reason in unsafe:
+            print(f"  [Backward Round {rnd} SAFETY] '{r['name']}' met removal threshold but disqualified: {reason}")
+            self._finalize_covariate_result(r['name'], rnd, 'RETAINED_UNSAFE', r.get('mode', 'add'))
+        removable = safe_removable
+
         if not removable:
             base_ofv_s = f"{self.scm_round_base_ofv:.2f}" if self.scm_round_base_ofv is not None else "N/A"
             print(f"\n{'='*70}")
             print(f"BACKWARD ROUND {rnd} COMPLETE — NO ELIMINATION")
             print(f"{'='*70}")
-            print(f"  All remaining covariates significant at p<0.01 (ΔOFV on removal >= {threshold})")
+            if unsafe:
+                print(f"  All removal candidates that met threshold were numerically unsafe (see SAFETY lines above)")
+            else:
+                print(f"  All remaining covariates significant at p<0.01 (ΔOFV on removal >= {threshold})")
             print(f"  Full model OFV: {base_ofv_s}")
             print(f"  Tested for removal: {[r['name'] for r in self.scm_round_results]}")
             print(f"{'='*70}")
             if self.scm_round_base_code:
                 self.current_code = self.scm_round_base_code
                 self.best_code = self.scm_round_base_code
+            unsafe_names = {r['name'] for r, _ in unsafe}
             for r in self.scm_round_results:
-                self._finalize_covariate_result(r['name'], rnd, 'RETAINED')
+                if r['name'] in unsafe_names:
+                    continue
+                self._finalize_covariate_result(r['name'], rnd, 'RETAINED', r.get('mode', 'add'))
             return False
 
         # 제거 대상: ΔOFV(제거 비용) 가장 작은 것 (제거해도 가장 덜 나빠지는 covariate)
@@ -2988,7 +3235,7 @@ ABSOLUTE PROHIBITIONS IN PHASE 4 (cannot be overridden):
                 self.current_code = self.scm_round_base_code
                 self.best_code = self.scm_round_base_code
             for r in self.scm_round_results:
-                self._finalize_covariate_result(r['name'], rnd, 'RETAINED')
+                self._finalize_covariate_result(r['name'], rnd, 'RETAINED', r.get('mode', 'add'))
             return False
 
         # 제거 확정
@@ -3000,11 +3247,14 @@ ABSOLUTE PROHIBITIONS IN PHASE 4 (cannot be overridden):
             'round': rnd,
         })
 
+        unsafe_names = {r['name'] for r, _ in unsafe}
         for r in self.scm_round_results:
+            if r['name'] in unsafe_names:
+                continue
             if r['name'] == loser_name:
-                self._finalize_covariate_result(r['name'], rnd, 'ELIMINATED')
+                self._finalize_covariate_result(r['name'], rnd, 'ELIMINATED', r.get('mode', 'add'))
             else:
-                self._finalize_covariate_result(r['name'], rnd, 'RETAINED')
+                self._finalize_covariate_result(r['name'], rnd, 'RETAINED', r.get('mode', 'add'))
 
         base_ofv_s = f"{self.scm_round_base_ofv:.2f}" if self.scm_round_base_ofv is not None else "N/A"
         print(f"\n{'='*70}")
@@ -3039,10 +3289,18 @@ ABSOLUTE PROHIBITIONS IN PHASE 4 (cannot be overridden):
 
         return True
 
-    def _finalize_covariate_result(self, name: str, rnd: int, result: str) -> None:
-        """covariate_history에서 해당 라운드의 result를 최종 확정"""
+    def _finalize_covariate_result(self, name: str, rnd: int, result: str, mode: str = 'add') -> None:
+        """covariate_history에서 해당 라운드의 result를 최종 확정
+
+        forward와 backward 라운드 번호는 각자 1부터 독립적으로 세므로,
+        forward round 1에서 추가 테스트된 covariate와 backward round 1에서
+        제거 테스트된 같은 covariate가 (name, round)만으로는 구분되지 않는다
+        (예: WT on V1이 forward round1 승자였다가 backward round1에서 다시
+        제거 대상으로 테스트되는 경우). mode('add'|'remove')까지 같이 매칭해
+        서로 다른 라운드의 기록을 잘못 덮어쓰지 않도록 한다.
+        """
         for h in self.covariate_history:
-            if h['name'] == name and h.get('round') == rnd:
+            if h['name'] == name and h.get('round') == rnd and h.get('mode', 'add') == mode:
                 h['result'] = result
                 break
 
@@ -3865,7 +4123,9 @@ ABSOLUTE PROHIBITIONS IN PHASE 4 (cannot be overridden):
 
                 icon   = {'ACCEPTED': '[WINNER]', 'TESTED': '[    ]',
                           'REJECTED': '[ REJ ]', 'FAILED': '[ ERR ]',
-                          'RETAINED': '[ KEEP ]', 'ELIMINATED': '[ ELIM]'}.get(result, '[  ?  ]')
+                          'RETAINED': '[ KEEP ]', 'ELIMINATED': '[ ELIM]',
+                          'REJECTED_UNSAFE': '[UNSAFE]', 'RETAINED_UNSAFE': '[UNSAFE]'
+                          }.get(result, '[  ?  ]')
                 d_s    = f"{d_ofv:.2f}" if d_ofv is not None else "N/A"
                 ofv_s  = f"{he.get('ofv'):.2f}" if he.get('ofv') is not None else "N/A"
 
