@@ -12,28 +12,130 @@ PKGPT analyzes a NONMEM-format dataset, generates an initial control stream, exe
 
 ## Overview
 
-PKGPT connects four components of population PK model development:
+PKGPT automatically generates and iteratively improves NONMEM population pharmacokinetic models. The system:
 
-- Dataset interpretation and candidate-covariate detection
-- Complete NONMEM control-stream generation
-- NONMEM execution and output parsing
-- Phase-specific, iterative model refinement
+1. **Analyzes** the dataset structure and concentration-time profile
+2. **Generates** a complete initial NONMEM control stream
+3. **Executes** NONMEM and parses model results
+4. **Improves** the model through a five-phase optimization workflow
+5. **Performs** forward selection and backward elimination for covariates
+6. **Saves** the selected model, iteration history, and terminal transcript
 
 NONMEM remains the estimation engine. PKGPT is intended to support, not replace, pharmacometric judgment.
 
+## Features
+
+- **Automated model generation:** creates complete NONMEM control streams from NONMEM-format datasets
+- **Automatic compartment guidance:** evaluates concentration-time profiles and supports data-informed selection between one- and two-compartment models
+- **NONMEM-aware parsing:** extracts OFV, parameter estimates, RSE, shrinkage, covariance status, warnings, and errors
+- **Recursive optimization:** proposes targeted model changes based on the current NONMEM results
+- **Phase-specific development:** separates base-model stabilization, structural diagnosis, overfitting control, IIV optimization, and covariate modeling
+- **Stepwise covariate modeling:** performs round-based forward selection followed by automatic backward elimination
+- **Flexible covariate control:** supports automatic candidate detection or user-selected covariates and target parameters
+- **Preliminary-information input:** accepts optional drug, nonclinical, published-data, population, and covariate context
+- **Multi-model access:** supports configured Claude, Gemini, and GPT profiles through OpenRouter
+- **Progress and run records:** saves model files, NONMEM listings, SCM decisions, and a complete terminal transcript
+
 ## What's New in PKGPT 2.0
 
-- Corrected execution of the five-phase optimization workflow
-- Round-based forward selection and automatic backward elimination for SCM
-- Optional restriction of SCM to user-selected covariates and target parameters
-- Optional preliminary information through `--prior-info`
-- PK plausibility context with web-search citation URLs
-- Safety checks for covariance, parameter boundaries, implausible OFV, OMEGA collapse, and excessive ETA shrinkage
-- Dose-unit and weight-normalization consistency checks
-- OpenRouter access to configured Claude, Gemini, and GPT model profiles
-- Automatic terminal transcripts and detailed iteration/SCM records
+PKGPT 2.0 is an updated version of the [original PKGPT by Gumgo91](https://github.com/Gumgo91/PKGPT). The original repository already provided dataset analysis, automatic one- versus two-compartment guidance, complete NONMEM control-stream generation, NONMEM execution, result parsing, recursive AI-guided improvement, progress tracking, and final-model saving. These retained capabilities are not presented as new PKGPT 2.0 functions.
 
-Dataset analysis, control-stream generation, NONMEM execution, result parsing, recursive improvement, and final-model saving from the original workflow are retained.
+PKGPT 2.0 adds or corrects the following behavior:
+
+### Five-phase optimization
+
+The existing five-phase design is made operational as a controlled sequence:
+
+- Phase-specific prompts are routed according to the actual current phase.
+- A qualified base model can transition into Phase 5 instead of stopping before covariate analysis.
+- Phase 2 completion requires successful minimization and covariance without important boundary warnings.
+- Phase 2 recovery prioritizes initial values and bounds, IIV simplification, and residual-error correction before changing compartment structure.
+- Covariate insertion is restricted during Phase 2 and Phase 4 so that base-model problems are not hidden by premature covariate effects.
+- Repeated syntax or minimization failures can restore the best known model before another recovery attempt.
+
+### Complete stepwise covariate modeling
+
+Phase 5 now implements a deterministic SCM workflow rather than relying only on general AI-guided covariate suggestions:
+
+- Every forward candidate in a round is tested from the same frozen base model.
+- The largest statistically significant OFV improvement is selected.
+- Forward selection uses `Delta OFV < -3.84` (1 df).
+- Automatic backward elimination follows using an OFV increase of `6.63` (1 df).
+- Phase 5 continues until the applicable candidate set has been evaluated, independently of the Phase 1-4 iteration limit.
+- The selected forward winner becomes the correctly recorded base for the next round and for backward elimination.
+- The final SCM iteration is retained in model history before the final summary is produced.
+- Forward and backward results are distinguished in covariate history.
+- Candidate, winner, retained, rejected, unsafe, and eliminated outcomes are recorded with their iteration numbers.
+
+During an SCM test, the structural model, ADVAN/TRANS choice, estimation method, residual-error model, and IIV structure are frozen. The generated model is also checked for unintended covariates or target parameters.
+
+### User control of covariate analysis
+
+Automatic covariate detection remains available. Users can optionally restrict Phase 5 to selected dataset covariates and specify which PK parameters, such as `CL` or `V1`, should be tested.
+
+Additional covariate-handling changes include:
+
+- SCM centering medians are calculated from the dataset rather than fixed reference values.
+- Candidate effect forms are selected consistently from dataset characteristics.
+- A covariate can be evaluated against more than one relevant PK parameter.
+- Weight is evaluated through SCM rather than being automatically forced into every base model.
+- A user-selected candidate is prioritized for testing but is not automatically accepted; it must satisfy the same SCM criteria.
+
+### Optional preliminary information
+
+The `--prior-info` option allows user-provided context to be included when available:
+
+- Drug name and pharmacological class
+- Nonclinical PK information
+- Previously published information supplied by the user
+- Study population
+- Covariates and PK parameters to prioritize
+
+Only populated fields are added to the prompts. The workflow continues to run when this information is not provided, and observed dataset information takes priority when supplied context conflicts with the data.
+
+### PK plausibility and citation context
+
+Plausible PK ranges and typical values are generated before the initial control stream and used as working references for initial estimates and later plausibility review.
+
+- Parameter requests follow the selected structure: `CL` and `V` for one compartment, with `Q` and `V2` added for two compartments.
+- Boundary-collapsed parameter estimates are not blindly reused as the next initial values.
+- Web-search citation URLs can be returned with the plausibility context.
+- Citation URLs are saved for follow-up review, but the software does not automatically verify that a particular sentence or table directly supports each individual PK parameter.
+
+### Stronger model-safety checks
+
+PKGPT 2.0 adds checks around covariance status, parameter boundaries, compartment consistency, ADVAN/TRANS compatibility, repeated failed strategies, and estimation-method substitutions.
+
+For Phase 5, candidate-level numerical safety is assessed before forward or backward decisions are finalized:
+
+- Covariance-failed candidates cannot replace the SCM base.
+- OFV below `-50` is treated as implausible for the current safety gate.
+- Complete OMEGA collapse is flagged when all extracted OMEGA estimates are below `0.001`.
+- Maximum ETA shrinkage above `95%` is treated as unsafe.
+- Unsafe forward candidates are rejected even when their OFV appears favorable.
+- Unsafe backward-removal models do not justify eliminating the retained covariate.
+
+Shrinkage decisions use maximum ETA shrinkage consistently, and RSE values, AI quality findings, detailed NONMEM output, and critical issues are propagated to subsequent improvement steps.
+
+### Dose-unit safeguards
+
+Dose-scale checks consider mg, mg/kg, mcg, mcg/kg, and g interpretations together with `AMT/WT` and `AMT*WT` variability. When a likely mismatch is detected, the generated model can apply an `F1` conversion. These checks are safeguards and still require confirmation from the protocol and data specification.
+
+### Multi-LLM access and reproducible records
+
+The original public version supported several Gemini profiles. PKGPT 2.0 extends model access through OpenRouter to configured Claude, Gemini, and GPT profiles. The model selected with `--model` is applied consistently to initial generation, iterative improvement, and structural-guard retry calls.
+
+Each run also produces:
+
+- A complete `<output_base>_terminal.txt` transcript
+- Iteration-level control streams and NONMEM listings
+- Phase transitions and quality metrics
+- Forward and backward SCM candidate outcomes
+- Final selected covariates and safety-rejection status
+
+The default Phase 1-4 maximum is increased from 10 to 20 iterations. Phase 5 is governed by completion of its candidate-testing procedure rather than that general iteration limit.
+
+The original capabilities for dataset analysis, automatic compartment guidance, control-stream generation, NONMEM execution, result parsing, recursive improvement, and final-model saving remain part of PKGPT 2.0.
 
 ## Core Features
 
