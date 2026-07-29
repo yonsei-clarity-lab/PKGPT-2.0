@@ -95,12 +95,16 @@ Only populated fields are added to the prompts. The workflow continues to run wh
 
 ### PK plausibility and citation context
 
-Plausible PK ranges and typical values are generated before the initial control stream and used as working references for initial estimates and later plausibility review.
+Unlike the original workflow, which primarily relied on the selected model's existing knowledge for initial parameter suggestions, PKGPT 2.0 performs a targeted web search after identifying the likely drug context. The search-grounded response is structured into plausible ranges and population-level `typical` values before the initial NONMEM control stream is generated.
 
 - Parameter requests follow the selected structure: `CL` and `V` for one compartment, with `Q` and `V2` added for two compartments.
+- The retrieved `typical` values are passed to the initial-generation prompt and requested as the starting THETA estimates for matching PK parameters.
+- The searched typical single-dose value is also used in dose-scale consistency checks.
 - Boundary-collapsed parameter estimates are not blindly reused as the next initial values.
 - Web-search citation URLs can be returned with the plausibility context.
 - Citation URLs are saved for follow-up review, but the software does not automatically verify that a particular sentence or table directly supports each individual PK parameter.
+
+This is a web-search-grounded LLM workflow, not a deterministic PubMed, label, or pharmacometric-database parser. The model synthesizes the searched information into the structured values used by the prompt, so the resulting ranges and initial values still require review against the cited source.
 
 ### Stronger model-safety checks
 
