@@ -4,7 +4,7 @@
 
 # PKGPT 2.0 - Pharmacokinetic NONMEM Optimizer
 
-AI-assisted generation and iterative optimization of NONMEM population pharmacokinetic models.
+PKGPT automatically generates and iteratively improves NONMEM population pharmacokinetic models using advanced AI.
 
 PKGPT analyzes a NONMEM-format dataset, generates an initial control stream, executes NONMEM, evaluates the output, and iteratively proposes model updates. PKGPT 2.0 retains the workflow of the [original PKGPT](https://github.com/Gumgo91/PKGPT) while improving model-development control, safety, reproducibility, and user input.
 
